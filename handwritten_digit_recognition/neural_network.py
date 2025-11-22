@@ -21,6 +21,21 @@ class Network(object):
             a = np.dot(w, a) + b # Similar to perceptron output
             a = self.sigmoid(a) # Output compression between 0-1
         return a
+    
+    def training_loss(self, data): # (OPTIONAL) Compute the average loss on the data set
+        """
+        Calcule la loss moyenne (MSE) sur un ensemble de données.
+        La loss par échantillon est 0.5 * ||a - y||^2.
+        """
+        if len(data) == 0:
+            return 0.0
+
+        total = 0.0
+        for x, y in data:
+            a = self.feedForward(x)
+            diff = a - y
+            total += 0.5 * np.linalg.norm(diff) ** 2
+        return total / len(data)
 
     def SGD(self, training_data, epochs, mini_batch_size, eta,
             test_data=None, log_fn=print, epoch_callback=None):
@@ -39,8 +54,6 @@ class Network(object):
         if log_fn is None:
             def log_fn(msg):
                 pass
-
-        log_fn("Starting SGD training...")
         if test_data:
             n_test = len(test_data)
         else:
@@ -62,8 +75,16 @@ class Network(object):
             for mini_batch in mini_batches:
                 self.update_mini_batch(mini_batch, eta)
 
+            # ---------- NOUVEAU : calcul de la loss d'entraînement ----------
+            train_loss = self.training_loss(training_data)
+            # ---------------------------------------------------------------
+
             # metrics de fin d'epoch
-            metrics = {"epoch": j + 1, "epochs": epochs}
+            metrics = {
+                "epoch": j + 1,
+                "epochs": epochs,
+                "train_loss": float(train_loss),
+            }
 
             if test_data:
                 correct = self.evaluate(test_data)
@@ -74,12 +95,16 @@ class Network(object):
                     "test_accuracy": acc,
                 })
                 log_fn(
-                    "Epoch {0}/{1}: {2} / {3} correct (accuracy={4:.4f})".format(
-                        j + 1, epochs, correct, n_test, acc
+                    "Epoch {0}/{1}: loss={2:.4f} | {3} / {4} correct (accuracy={5:.4f})".format(
+                        j + 1, epochs, train_loss, correct, n_test, acc
                     )
                 )
             else:
-                log_fn("Epoch {0}/{1} complete".format(j + 1, epochs))
+                log_fn(
+                    "Epoch {0}/{1}: loss={2:.4f}".format(
+                        j + 1, epochs, train_loss
+                    )
+                )
 
             # callback pour l'UI (graph, poids, etc.)
             if epoch_callback is not None:

@@ -11,6 +11,9 @@ from neural_network import Network
 import cv2
 from streamlit_drawable_canvas import st_canvas
 
+# =========================
+#   CSS POUR FORCER LA TAILLE DU CANVAS
+# =========================
 
 CANVAS_HEIGHT = 400  # même valeur que dans st_canvas
 
@@ -26,6 +29,28 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# =========================
+#   BOOTSTRAP MODELS SAUVÉS
+# =========================
+
+def bootstrap_saved_models():
+    if "saved_models" not in st.session_state:
+        st.session_state.saved_models = {}
+
+    os.makedirs("saved_models", exist_ok=True)
+
+    for fname in os.listdir("saved_models"):
+        if fname.endswith(".pkl"):
+            path = os.path.join("saved_models", fname)
+            run_id = fname[:-4]  # tu peux parser mieux si tu veux extraire l'accuracy
+            if run_id not in st.session_state.saved_models:
+                st.session_state.saved_models[run_id] = path
+
+bootstrap_saved_models()
+
+
+
+
 # ==========================
 #   CONFIG STREAMLIT
 # ==========================
@@ -37,18 +62,6 @@ st.set_page_config(
 
 st.title("🧠 MNIST Deep Learning Lab")
 st.caption("Petit labo interactif pour explorer ton réseau neuronal MNIST.")
-
-st.markdown(
-    """
-Bienvenue dans **ton mini-lab MLOps** :
-
-- Configure le réseau et les hyperparamètres
-- Lances l'entraînement
-- Observe les **courbes de métriques**
-- Inspecte les **erreurs**, les **activations**, les **poids**
-- Teste un **mini AutoML** (recherche d'hyperparamètres)
-"""
-)
 
 # ==========================
 #   CHARGEMENT DES DONNÉES
@@ -81,6 +94,13 @@ if "misclassified_cache" not in st.session_state:
 if "saved_models" not in st.session_state:
     # run_id -> path modèle
     st.session_state.saved_models = {}
+
+if "weight_history" not in st.session_state:
+    # run_id -> {
+    #   "epochs": [1, 2, 3, ...],
+    #   "w0_list": [W0_epoch1, W0_epoch2, ...]  (poids de la première couche)
+    # }
+    st.session_state.weight_history = {}
 
 # ==========================
 #   FONCTIONS UTILITAIRES
@@ -150,23 +170,79 @@ def compute_weight_stats(net: Network):
     }
 
 def save_model(net: Network, run_id: str, accuracy: float = None) -> str:
+    """
+    Sauvegarde seulement les paramètres du réseau (sizes, biais, poids),
+    et pas l'objet Network complet, pour éviter les problèmes de pickle
+    avec les reruns Streamlit.
+    """
     os.makedirs("saved_models", exist_ok=True)
-    path = os.path.join("saved_models", f"{run_id}_{accuracy:.4f}.pkl" if accuracy is not None else f"{run_id}.pkl")
+
+    filename = (
+        f"{run_id}_{accuracy:.4f}.pkl" if accuracy is not None else f"{run_id}.pkl"
+    )
+    path = os.path.join("saved_models", filename)
+
+    payload = {
+        "sizes": net.sizes,
+        "biases": net.biases,
+        "weights": net.weights,
+    }
+
     with open(path, "wb") as f:
-        pickle.dump(net, f)
+        pickle.dump(payload, f)
+
     st.session_state.saved_models[run_id] = path
     return path
 
+
 def load_model(path: str) -> Network:
+    """
+    Charge un modèle sauvegardé.
+    - Nouveau format : dict {sizes, biases, weights}
+    - Ancien format (si tu as des vieux .pkl) : instance Network picklée
+    """
     with open(path, "rb") as f:
-        net = pickle.load(f)
-    return net
+        obj = pickle.load(f)
+
+    # Compatibilité avec les anciens fichiers où on picklait directement Network
+    if isinstance(obj, Network):
+        return obj
+
+    # Nouveau format : dict de paramètres
+    if isinstance(obj, dict):
+        sizes = obj["sizes"]
+        net = Network(sizes)
+        net.biases = obj["biases"]
+        net.weights = obj["weights"]
+        return net
+
+    raise TypeError(f"Format de modèle inconnu dans {path}: {type(obj)}")
+
+
+def compute_confusion_matrix(net: Network, data, num_classes: int = 10):
+    """
+    Calcule une matrice de confusion (num_classes x num_classes)
+    sur un dataset de la forme [(x, y_true), ...].
+
+    Lignes  = classes réelles
+    Colonnes = classes prédites
+    """
+    cm = np.zeros((num_classes, num_classes), dtype=int)
+
+    for x, y_true in data:
+        a = net.feedForward(x)
+        y_pred = int(np.argmax(a))
+        y_true = int(y_true)
+        if 0 <= y_true < num_classes and 0 <= y_pred < num_classes:
+            cm[y_true, y_pred] += 1
+
+    return cm
 
 # ==========================
 #   SIDEBAR – CONTROLS
 # ==========================
 
-st.sidebar.header("🎛 Hyperparamètres & Réseau")
+st.sidebar.header("Hyperparamètres")
 
 epochs = st.sidebar.slider("Epochs", 1, 50, 10)
 learning_rate = st.sidebar.slider("Learning rate (η)", 0.01, 5.0, 3.0, step=0.01)
@@ -194,9 +270,192 @@ limit_train = st.sidebar.number_input(
 #   LAYOUT PRINCIPAL
 # ==========================
 
-tab_train, tab_metrics, tab_errors, tab_activations, tab_weights, tab_draw = st.tabs(
-    ["📡 Entraînement", "📈 Métriques", "🕵️ Erreurs", "✨ Activations", "🧮 Poids", "🖊️ Dessiner & Tester"]
+tab_readme, tab_train, tab_draw, tab_activations, tab_weights, tab_metrics, tab_errors = st.tabs(
+    ["📖 Readme", "📡 Entraînement", "🖊️ Dessiner & Tester","✨ Activations", "🧮 Poids", "📈 Métriques", "🕵️ Erreurs"]
 )
+
+# ========== ONGLET README ==========
+with tab_readme:
+    st.subheader("Bienvenue dans le MNIST Deep Learning Lab 👋")
+
+    st.markdown("""
+## 📚 Qu’est-ce que MNIST ?
+
+MNIST, c’est un petit classique du machine learning.  
+Il s’agit d’un jeu de données contenant **70 000 images de chiffres manuscrits** (de 0 à 9), chacune en **28×28 pixels**.  
+Les images proviennent de milliers de personnes différentes, ce qui en fait un terrain parfait pour apprendre comment un modèle reconnaît des motifs visuels.
+
+En bref :  
+> MNIST, c’est le *“Hello World”* du Deep Learning — simple, propre, et idéal pour comprendre les bases.
+
+---
+
+## 🎯 1. À quoi sert cette application ?
+
+Ce site te permet de **configurer**, **entraîner** et **tester** ton propre réseau de neurones, le tout sans écrire une seule ligne de code.
+
+Tu peux :
+
+### 🔧 Configurer ton réseau
+- Choisir la taille de la couche cachée  
+- Ajuster les hyperparamètres (epochs, learning rate, mini-batch…)  
+- Activer certaines options d’entraînement  
+
+### 🚀 Lancer l’entraînement
+- Suivre la progression dans un terminal en direct  
+- Visualiser l’évolution de l’accuracy  
+- Voir les erreurs, les activations internes et même les poids appris par le modèle  
+
+### ✏️ Tester le modèle
+- Sur des images MNIST réelles  
+- Ou en dessinant toi-même un chiffre dans un canvas interactif
+
+L’objectif est pédagogique : comprendre *comment* un réseau apprend, et *pourquoi* il se trompe parfois.
+
+---
+
+## 🧩 2. Comment fonctionne un réseau de neurones ? (Version simple)
+
+Un réseau de neurones, c’est un ensemble de “couches” qui transforment progressivement une entrée (ici, une image 28×28) pour prédire un chiffre.
+
+### Structure typique :
+- **Input** : 784 pixels (28×28)
+- **Hidden layer** : une couche de neurones intermédiaires
+- **Output** : 10 neurones (un par chiffre 0–9)
+
+À chaque étape :
+
+1. Les neurones reçoivent des nombres (les intensités des pixels)
+2. Ils les multiplient par des **poids**
+3. Ils appliquent une fonction (sigmoïde)
+4. Ils transmettent le résultat à la couche suivante
+
+Pendant l’entraînement, le modèle :
+
+- fait une prédiction  
+- mesure l’erreur  
+- ajuste ses poids pour faire mieux au prochain passage  
+
+En répétant ça des milliers de fois → il apprend.
+
+---
+
+## ⚙️ 3. Les hyperparamètres : ce qu’ils font, et comment les régler
+
+Les hyperparamètres sont les réglages qui influencent *comment* le modèle apprend.
+
+### 🔸 **Epochs**
+Le nombre de fois où le modèle passe sur **tout** le dataset.
+
+- Peu : modèle pas assez entraîné  
+- Trop : risque de mémoriser inutilement  
+
+💡 Pour MNIST : **10 à 30 epochs suffisent largement**
+
+---
+
+### 🔸 **Learning rate (η)**
+La “vitesse d’apprentissage”.
+
+- Trop faible → apprentissage lent  
+- Trop fort → instable, le modèle oscille ou diverge  
+
+💡 Pour ce réseau : **entre 0.5 et 3.0 fonctionne très bien**
+
+---
+
+### 🔸 **Mini-batch size**
+Nombre d’exemples utilisés avant chaque mise à jour des poids.
+
+- Petit batch → apprentissage plus “vivant”, mais plus bruité  
+- Gros batch → plus stable, mais peut donner des résultats moins bons  
+
+💡 Valeurs conseillées : **10 à 50**
+
+---
+
+## 🧱 4. La couche cachée (Hidden Layer)
+
+La couche cachée est le cœur du modèle : c’est là qu’il apprend les **motifs** caractéristiques des chiffres :
+
+- courbes  
+- angles  
+- tiges verticales  
+- coins  
+- boucles  
+- etc.
+
+Plus la hidden layer est grande :
+
+- plus le modèle peut apprendre de choses  
+- mais plus il devient lent, et plus il risque de surapprendre
+
+💡 Pour MNIST : **entre 50 et 150 neurones**, c’est un bon compromis.
+
+---
+
+## 🧪 5. Les options d’entraînement
+
+### 🔸 Utiliser la validation comme test
+Permet d’évaluer le modèle *sans toucher au vrai jeu de test*.  
+C’est pratique pour ajuster les hyperparamètres sans “tricher” sur les performances réelles.
+
+### 🔸 Limiter le nombre d’exemples d’entraînement
+Tu peux choisir de n’entraîner le modèle que sur une partie du dataset.
+
+Utile pour :
+- des tests rapides  
+- économiser les ressources  
+- observer comment la quantité de données influence l’apprentissage  
+
+💡 0 = utiliser tout MNIST (valeur normale)
+
+---
+
+## 🚀 6. Lancer l’entraînement
+
+1. Choisis :
+   - la taille de la hidden layer  
+   - les hyperparamètres  
+   - les options d’entraînement  
+
+2. Clique sur **Start training**
+
+3. Observe :
+   - le terminal qui se met à jour  
+   - les courbes d’évolution  
+   - les erreurs et activations internes  
+   - les poids du réseau  
+
+À la fin, un modèle est automatiquement sauvegardé.
+
+---
+
+## ✏️ 7. Tester ton modèle (canvas de dessin)
+
+Dans l’onglet **🖊️ Dessiner & Tester** :
+
+- sélectionne un modèle sauvegardé  
+- dessine un chiffre à la souris  
+
+Le dessin est automatiquement :
+
+- converti en image 28×28  
+- normalisé  
+- passé au modèle
+
+Le réseau te renvoie :
+- sa prédiction  
+- les probabilités associées (softmax)
+
+---
+
+N’hésite pas à explorer, tester plusieurs hyperparamètres et comparer les résultats.  
+Amuse-toi bien avec le Deep Learning 🙂
+""")
+
+
+
 
 # ========== ONGLET TRAINING ==========
 
@@ -241,23 +500,43 @@ with tab_train:
 def make_epoch_callback(run_id):
     def epoch_callback(epoch, metrics, network: Network):
         # log text
-        if "test_accuracy" in metrics:
-            append_log(
-                f"[{run_id}] Epoch {epoch}/{metrics['epochs']} "
-                f"- test_acc={metrics['test_accuracy']:.4f}"
-            )
-        else:
-            append_log(f"[{run_id}] Epoch {epoch}/{metrics['epochs']} complete")
-
-        # metrics history pour les graphes
+        # if "test_accuracy" in metrics:
+        #     append_log(
+        #         f"[{run_id}] Epoch {epoch}/{metrics['epochs']} "
+        #         f"- test_acc={metrics['test_accuracy']:.4f}"
+        #     )
+        # else:
+        #     append_log(f"[{run_id}] Epoch {epoch}/{metrics['epochs']} complete")
+        
+        # ---------- Metrics history pour les graphes ----------
         entry = {
             "run_id": run_id,
             "epoch": epoch,
         }
         entry.update(metrics)
         st.session_state.metrics_history.append(entry)
-    return epoch_callback
 
+        # ---------- Historique des poids de la première couche ----------
+        if "weight_history" not in st.session_state:
+            st.session_state.weight_history = {}
+
+        if run_id not in st.session_state.weight_history:
+            st.session_state.weight_history[run_id] = {
+                "epochs": [],
+                "w0_list": [],
+            }
+
+        hist = st.session_state.weight_history[run_id]
+
+        # On logge l'epoch
+        hist["epochs"].append(epoch)
+
+        # Snapshot des poids de la première couche (input -> hidden)
+        if len(network.weights) > 0:
+            # copie pour ne pas être écrasé par les updates suivants
+            hist["w0_list"].append(network.weights[0].copy())
+
+    return epoch_callback
 # ========== FONCTION POUR TRAINING AVEC PARAMÈTRES CUSTOM (AutoML) ==========
 
 def run_single_training_with_params(eta, batch, cfg_name="automl"):
@@ -289,9 +568,10 @@ def run_single_training_with_params(eta, batch, cfg_name="automl"):
     }
 
     append_log(f"=== NEW RUN {run_id} ===")
-    append_log(f"Sizes: {sizes}")
+    append_log(f"Architecture: {sizes}")
     append_log(f"Epochs={epochs}, eta={eta}, mini_batch={batch}")
     append_log(f"Train samples={len(train_subset)}, Test samples={len(test_set)}")
+    append_log(f"======================================")
 
     # Lancer SGD avec callback
     net.SGD(
@@ -332,21 +612,24 @@ def run_single_training(cfg_name="manual"):
 if start_training:
     run_single_training(cfg_name="manual")
 
-# ========== ONGLET MÉTRIQUES ==========
 
+# ========== ONGLET MÉTRIQUES ==========
 with tab_metrics:
-    st.subheader("Courbes de métriques")
+    st.subheader("📈 Métriques d'entraînement et de performance")
 
     if not st.session_state.metrics_history:
-        st.info("Aucune métrique pour l'instant. Lance un entraînement.")
+        st.info("Aucune métrique pour l'instant. Lance un entraînement pour voir les courbes.")
     else:
         import pandas as pd
 
         df = pd.DataFrame(st.session_state.metrics_history)
         run_ids = df["run_id"].unique().tolist()
-        selected_run = st.selectbox("Sélectionne un run", run_ids)
+        selected_run = st.selectbox("Sélectionne un run à analyser", run_ids)
 
         df_run = df[df["run_id"] == selected_run].sort_values("epoch")
+
+        # ---------- COURBES DE BASE ----------
+        st.markdown("### Courbes de base")
 
         col1, col2 = st.columns(2)
 
@@ -356,14 +639,359 @@ with tab_metrics:
                     df_run.set_index("epoch")["test_accuracy"],
                     height=300,
                 )
-                st.caption("Accuracy test par epoch")
+                st.caption("Accuracy sur le set de test (ou validation) en fonction des epochs.")
+
         with col2:
             if "test_correct" in df_run:
                 st.bar_chart(
                     df_run.set_index("epoch")["test_correct"],
                     height=300,
                 )
-                st.caption("Nb de prédictions correctes par epoch")
+                st.caption("Nombre de prédictions correctes par epoch.")
+
+    # ---------- SUITE : GUIDES / VISUS AVANCÉES ----------
+    st.markdown("---")
+    st.markdown("### 📚 Guide de lecture des visualisations")
+
+ # 1️⃣ Loss par epoch (avec courbe dans l'expander)
+    with st.expander("🧠 Loss par epoch"):
+        st.markdown(
+            """
+La **loss** mesure à quel point le modèle se trompe en moyenne.
+
+- Après chaque epoch, on calcule une valeur de loss sur le jeu d'entraînement.
+- Normalement, la loss doit **descendre** progressivement si le modèle apprend correctement.
+"""
+        )
+
+        # On vérifie que metrics_history n'est pas vide
+        if not st.session_state.metrics_history:
+            st.info("Aucune loss disponible : lance un entraînement pour voir la courbe.")
+        else:
+            import pandas as pd
+
+            df = pd.DataFrame(st.session_state.metrics_history)
+            run_ids = df["run_id"].unique().tolist()
+            
+            selected_run_loss = st.selectbox(
+                "Sélectionne un run pour afficher la loss",
+                run_ids,
+                key="select_run_loss"
+            )
+
+            df_run_loss = df[df["run_id"] == selected_run_loss].sort_values("epoch")
+
+            # Vérification de la dispo de la loss
+            if "train_loss" not in df_run_loss:
+                st.warning("Ce run ne contient pas de valeurs de loss.")
+            else:
+                st.line_chart(
+                    df_run_loss.set_index("epoch")["train_loss"],
+                    height=300
+                )
+
+                last_loss = df_run_loss["train_loss"].iloc[-1]
+                st.metric(
+                    "Dernière loss enregistrée",
+                    f"{last_loss:.4f}"
+                )
+
+        st.caption("La loss est calculée avec un MSE simple : 0.5 * || prédiction - vérité ||²")
+
+    # 2️⃣ TSNE / PCA des embeddings de la hidden layer (interactif)
+    with st.expander("🧩 TSNE / PCA de la couche cachée (interactif)"):
+        st.markdown(
+            """
+On projette ici les activations de la **couche cachée** dans un plan 2D
+pour voir comment le réseau sépare les chiffres dans son espace interne.
+
+Chaque point = une image MNIST, colorée selon son vrai chiffre.
+"""
+        )
+
+        # On ne peut rien faire tant qu'aucun modèle n'a été entraîné/sauvegardé
+        if st.session_state.current_run is None or "model_path" not in st.session_state.current_run:
+            st.info("Lance au moins un entraînement pour pouvoir calculer la projection TSNE/PCA.")
+        else:
+            run = st.session_state.current_run
+            net = load_model(run["model_path"])
+
+            import pandas as pd
+            import altair as alt
+
+            max_samples = len(test_data)
+            if max_samples == 0:
+                st.warning("Le set de test est vide, impossible de calculer la projection.")
+            else:
+                st.markdown("#### Paramètres de la projection")
+
+                n_samples = st.slider(
+                    "Nombre d'images à projeter",
+                    min_value=100,
+                    max_value=min(2000, max_samples),
+                    value=min(500, max_samples),
+                    step=100,
+                    help="Plus il y a de points, plus la projection est riche, mais plus le calcul est long."
+                )
+
+                method = st.radio(
+                    "Méthode de réduction de dimension",
+                    ["PCA (rapide)", "t-SNE (plus lent, plus joli)"],
+                    help="PCA donne une idée rapide, t-SNE donne souvent des clusters plus nets."
+                )
+
+                if st.button("Calculer la projection 2D"):
+                    from sklearn.decomposition import PCA
+                    from sklearn.manifold import TSNE
+
+                    # Récupération des activations de la couche cachée
+                    X = []
+                    y_labels = []
+                    for i, (x, y_true) in enumerate(test_data[:n_samples]):
+                        _, activations = forward_with_activations(net, x)
+                        hidden = activations[1]  # première couche cachée
+                        X.append(hidden.ravel())
+                        y_labels.append(int(y_true))
+
+                    X = np.array(X)
+
+                    # Choix du réducteur de dimension
+                    if method.startswith("PCA"):
+                        reducer = PCA(n_components=2)
+                    else:
+                        # t-SNE : plus lent, mais meilleure séparation visuelle
+                        reducer = TSNE(
+                            n_components=2,
+                            init="random",
+                            learning_rate="auto",
+                            perplexity=min(30, n_samples - 1),
+                        )
+
+                    with st.spinner("Calcul de la projection en 2D..."):
+                        emb = reducer.fit_transform(X)
+
+                    df_emb = pd.DataFrame({
+                        "x": emb[:, 0],
+                        "y": emb[:, 1],
+                        "label": y_labels,
+                    })
+
+                    st.markdown("#### Projection des embeddings de la couche cachée")
+
+                    chart = alt.Chart(df_emb).mark_circle(size=50, opacity=0.8).encode(
+                        x="x",
+                        y="y",
+                        color="label:N",
+                        tooltip=["label:N"],
+                    ).properties(
+                        height=400
+                    )
+
+                    st.altair_chart(chart, use_container_width=True)
+
+                    st.caption(
+                        "Chaque point est une image MNIST projetée dans l'espace latent. "
+                        "Les couleurs correspondent aux chiffres réels (0–9). "
+                        "On cherche à voir si les classes se regroupent bien."
+                    )
+
+    # 4️⃣ Animation de l’évolution des poids d’un neurone
+    with st.expander("🎞️ Animation de l’évolution des poids d’un neurone"):
+        st.markdown(
+            """
+Chaque neurone de la couche cachée possède **784 poids** (un par pixel).  
+Si on reshape ce vecteur en 28×28, on obtient une image qui représente **le motif auquel ce neurone est sensible**.
+
+Idée de visualisation :
+- pour un neurone donné,
+- on enregistre ses poids à différents epochs,
+- puis on affiche une **série d’images** (ou un slider temporel) qui montre comment ce motif évolue.
+
+Ce que l’on voit :
+- au début, les poids ressemblent à du bruit ;
+- progressivement, des formes apparaissent (traits verticaux, courbes, zones sombres/claires) ;
+- le neurone se “spécialise” dans un type de motif.
+
+> C’est une excellente manière d’illustrer qu’un réseau n’est pas une boîte noire magique, mais qu’il apprend effectivement des patrons visuels.
+"""
+        )
+
+        # --- Partie interactive : slider sur neurone & epoch ---
+        if "weight_history" not in st.session_state or not st.session_state.weight_history:
+            st.info("Aucun historique de poids disponible. Lance un entraînement pour commencer à enregistrer les poids.")
+        else:
+            import pandas as pd  # au cas où tu en as besoin plus bas
+
+            run_ids_hist = list(st.session_state.weight_history.keys())
+
+            selected_run_anim = st.selectbox(
+                "Sélectionne un run pour visualiser l'évolution d'un neurone",
+                run_ids_hist,
+                key="select_run_weight_anim",
+            )
+
+            hist = st.session_state.weight_history.get(selected_run_anim, None)
+
+            if hist is None or len(hist.get("w0_list", [])) == 0:
+                st.warning("Pas encore d'historique de poids pour ce run.")
+            else:
+                epochs_hist = hist["epochs"]
+                w0_list = hist["w0_list"]  # liste de matrices (hidden_size, 784)
+
+                # On suppose que la taille de la couche cachée ne change pas au cours du run
+                hidden_size_hist = w0_list[0].shape[0]
+
+                col_sel1, col_sel2 = st.columns(2)
+                with col_sel1:
+                    neuron_idx = st.slider(
+                        "Indice du neurone caché",
+                        min_value=0,
+                        max_value=hidden_size_hist - 1,
+                        value=0,
+                        key="anim_neuron_idx",
+                    )
+                with col_sel2:
+                    if len(epochs_hist) <= 1:
+                        # Un seul epoch disponible → pas de slider
+                        epoch_pos = 0
+                        st.info("Une seule epoch enregistrée pour ce run.")
+                    else:
+                        epoch_pos = st.slider(
+                            "Epoch",
+                            min_value=0,
+                            max_value=len(epochs_hist) - 1,
+                            value=len(epochs_hist) - 1,
+                            key="anim_epoch_idx",
+                        )
+
+                epoch_val = epochs_hist[epoch_pos]
+                # Poids du neurone sélectionné à cette epoch
+                w_vec = w0_list[epoch_pos][neuron_idx, :]  # shape (784,)
+                img = w_vec.reshape(28, 28)
+
+                # Normalisation locale pour l'affichage
+                w_min, w_max = img.min(), img.max()
+                if w_max > w_min:
+                    img_norm = (img - w_min) / (w_max - w_min)
+                else:
+                    img_norm = np.zeros_like(img)
+
+                st.image(
+                    img_norm,
+                    width=160,
+                    clamp=True,
+                    caption=f"Run {selected_run_anim} – neurone {neuron_idx}, epoch {epoch_val}",
+                )
+
+                # Option : courbe de la norme des poids de ce neurone au cours du temps
+                show_norms = st.checkbox(
+                    "Afficher l'évolution de la norme des poids de ce neurone",
+                    value=False,
+                    key="show_neuron_norm_curve",
+                )
+
+                if show_norms:
+                    norms = [float(np.linalg.norm(w0[neuron_idx, :])) for w0 in w0_list]
+                    df_norm = pd.DataFrame(
+                        {"epoch": epochs_hist, "weight_norm": norms}
+                    ).set_index("epoch")
+                    st.line_chart(df_norm)
+                    st.caption("La norme des poids donne une idée de la 'force' du filtre appris par ce neurone.")
+
+    # 5️⃣ Matrice de confusion
+    with st.expander("🧮 Matrice de confusion"):
+        st.markdown(
+            """
+La **matrice de confusion** résume comment le modèle se trompe entre les classes.
+
+- en lignes : la *vraie* classe (0, 1, 2, …, 9)
+- en colonnes : la classe *prédite* par le modèle
+- chaque case contient le nombre d’exemples correspondant
+
+On s’attend à ce que la **diagonale** soit dominante (bonnes prédictions).
+"""
+        )
+
+        # Vérifier qu'on a bien un modèle entraîné
+        if st.session_state.current_run is None or "model_path" not in st.session_state.current_run:
+            st.info("Lance un entraînement pour pouvoir calculer la matrice de confusion.")
+        else:
+            run = st.session_state.current_run
+            net = load_model(run["model_path"])
+
+            import pandas as pd
+            import altair as alt
+
+            # Choix du dataset
+            dataset_choice = st.radio(
+                "Dataset utilisé pour la matrice de confusion",
+                ["Test set", "Validation set"],
+                horizontal=True,
+                key="confusion_dataset_choice",
+            )
+
+            if dataset_choice == "Test set":
+                data = test_data
+            else:
+                data = validation_data
+
+            if len(data) == 0:
+                st.warning("Le dataset sélectionné est vide, impossible de calculer la matrice de confusion.")
+            else:
+                # Option : limiter le nombre d'exemples pour aller plus vite
+                max_samples = len(data)
+                n_samples = st.slider(
+                    "Nombre d'images utilisées pour la matrice",
+                    min_value=100,
+                    max_value=max_samples,
+                    value=min(1000, max_samples),
+                    step=100,
+                    key="confusion_n_samples",
+                    help="Plus il y a d'images, plus la matrice est représentative (mais plus c'est long).",
+                )
+
+                if st.button("Calculer la matrice de confusion", key="confusion_button"):
+                    subset = data[:n_samples]
+
+                    with st.spinner("Calcul en cours..."):
+                        cm = compute_confusion_matrix(net, subset, num_classes=10)
+
+                    total = cm.sum()
+                    correct = np.trace(cm)
+                    acc = correct / total if total > 0 else 0.0
+
+                    st.markdown(f"**Accuracy sur cet échantillon : {acc*100:.2f} %**")
+
+                    # Préparer les données pour un heatmap Altair
+                    df_cm = pd.DataFrame(cm, index=range(10), columns=range(10))
+                    df_plot = (
+                        df_cm
+                        .reset_index()
+                        .melt(id_vars="index", var_name="pred", value_name="count")
+                        .rename(columns={"index": "true"})
+                    )
+
+                    st.markdown("### Heatmap de la matrice de confusion")
+
+                    chart = (
+                        alt.Chart(df_plot)
+                        .mark_rect()
+                        .encode(
+                            x=alt.X("pred:O", title="Classe prédite"),
+                            y=alt.Y("true:O", title="Classe réelle"),
+                            color=alt.Color("count:Q", scale=alt.Scale(scheme="blues")),
+                            tooltip=["true", "pred", "count"],
+                        )
+                        .properties(height=400)
+                    )
+
+                    st.altair_chart(chart, use_container_width=True)
+
+                    st.caption(
+                        "Les valeurs sur la diagonale correspondent aux prédictions correctes. "
+                        "Les cases hors diagonale montrent quelles classes sont le plus souvent confondues."
+                    )
+
 
 # ========== ONGLET ERREURS ==========
 
@@ -454,66 +1082,61 @@ with tab_weights:
         col4.metric("Max", f"{stats['max']:.4e}")
 
         st.markdown("---")
-        st.markdown("### Poids par classe (couche hidden → output)")
+        st.markdown("### Représentation des poids entre la couche d’entrée et la couche cachée")
 
-        show_output_weights = st.checkbox(
-            "Afficher les poids de la couche de sortie (1 image par classe)",
-            value=True
-        )
+        
+        w0 = net.weights[0]  # shape (hidden_size, 784)
+        cols = st.columns(10)
+        for i in range(min(10, w0.shape[0])):
+            col = cols[i % len(cols)]
+            with col:
+                img_w = w0[i, :].reshape(28, 28)
 
-        if show_output_weights:
-            # Les poids de la dernière couche : shape (10, hidden_size)
-            w_out = net.weights[-1]  
+                # Normalisation locale pour ce neurone : [0, 1]
+                w_min = img_w.min()
+                w_max = img_w.max()
+                if w_max > w_min:
+                    img_w_norm = (img_w - w_min) / (w_max - w_min)
+                else:
+                    # cas dégénéré : tous les poids identiques
+                    img_w_norm = np.zeros_like(img_w)
 
-            # Chaque neurone de sortie utilise les 'features' produites par les hidden neurons
-            # On va reconstruire une image 28x28 en faisant une combinaison pondérée 
-            # des poids input->hidden, pondérée par les poids hidden->output.
+                st.image(img_w_norm, width=60, caption=f"Neuron {i}")
 
-            w_hidden = net.weights[0]   # shape (hidden_size, 784)
-
-            cols = st.columns(10)
-            for digit in range(10):
-                col = cols[digit % len(cols)]
-                with col:
-                    # Combinaison linéaire des filtres cachés
-                    # w_out[digit]: shape (hidden_size,)
-                    combined = np.dot(w_out[digit], w_hidden)  # shape (784,)
-
-                    # reshape en image
-                    img = combined.reshape(28, 28)
-
-                    # Normalisation locale pour l'affichage
-                    mn, mx = img.min(), img.max()
-                    if mx > mn:
-                        img_norm = (img - mn) / (mx - mn)
-                    else:
-                        img_norm = np.zeros_like(img)
-
-                    st.image(img_norm, width=60, caption=f"Classe {digit}")
 
         st.markdown("---")
-        st.markdown("### Poids en entrée pour chaque classe (optionnel)")
+        st.markdown("### Représentation des poids entre la couche cachée et la couche de sortie")
 
-        show_weight_images = st.checkbox("Afficher les poids comme images (couche input->hidden)", value=True)
-        if show_weight_images and len(net.weights) > 0:
-            w0 = net.weights[0]  # shape (hidden_size, 784)
-            cols = st.columns(10)
-            for i in range(min(10, w0.shape[0])):
-                col = cols[i % len(cols)]
-                with col:
-                    img_w = w0[i, :].reshape(28, 28)
+        # Les poids de la dernière couche : shape (10, hidden_size)
+        w_out = net.weights[-1]  
 
-                    # Normalisation locale pour ce neurone : [0, 1]
-                    w_min = img_w.min()
-                    w_max = img_w.max()
-                    if w_max > w_min:
-                        img_w_norm = (img_w - w_min) / (w_max - w_min)
-                    else:
-                        # cas dégénéré : tous les poids identiques
-                        img_w_norm = np.zeros_like(img_w)
+        # Chaque neurone de sortie utilise les 'features' produites par les hidden neurons
+        # On va reconstruire une image 28x28 en faisant une combinaison pondérée 
+        # des poids input->hidden, pondérée par les poids hidden->output.
 
-                    st.image(img_w_norm, width=60, caption=f"Neuron {i}")
+        w_hidden = net.weights[0]   # shape (hidden_size, 784)
 
+        cols = st.columns(10)
+        for digit in range(10):
+            col = cols[digit % len(cols)]
+            with col:
+                # Combinaison linéaire des filtres cachés
+                # w_out[digit]: shape (hidden_size,)
+                combined = np.dot(w_out[digit], w_hidden)  # shape (784,)
+
+                # reshape en image
+                img = combined.reshape(28, 28)
+
+                # Normalisation locale pour l'affichage
+                mn, mx = img.min(), img.max()
+                if mx > mn:
+                    img_norm = (img - mn) / (mx - mn)
+                else:
+                    img_norm = np.zeros_like(img)
+
+                st.image(img_norm, width=60, caption=f"Classe {digit}")
+
+        
         st.markdown("---")
         st.markdown("### Histogramme global des poids")
 
