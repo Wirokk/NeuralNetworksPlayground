@@ -1,232 +1,237 @@
 import os
 import json
 import pickle
-from datetime import datetime
+from typing import Dict, Any, List, Optional
 
+from neural_network import Network  # pour les types / compat éventuelle
 
-# =========================
-#    CONFIG PATHS
-# =========================
-
+# Dossier racine où tout est sauvegardé
 RUNS_DIR = "runs"
-RUNS_HISTORY_FILE = "runs_history.json"
+HISTORY_PATH = os.path.join(RUNS_DIR, "runs_history.json")
 
 
-# =========================
-#    UTILITAIRES I/O
-# =========================
+# ============================================================
+# Utils de base
+# ============================================================
 
-def ensure_dirs():
-    """Ensure required directories exist."""
+def _ensure_dirs() -> None:
+    """Crée le dossier runs/ si besoin."""
     os.makedirs(RUNS_DIR, exist_ok=True)
 
 
-def save_pickle(path, obj):
-    with open(path, "wb") as f:
-        pickle.dump(obj, f)
+def _run_dir(run_id: str) -> str:
+    return os.path.join(RUNS_DIR, run_id)
 
 
-def load_pickle(path):
-    with open(path, "rb") as f:
-        return pickle.load(f)
+# ============================================================
+# History JSON (pour le Hall of Fame)
+# ============================================================
 
-
-def save_json(path, obj):
-    with open(path, "w") as f:
-        json.dump(obj, f, indent=4)
-
-
-def load_json(path):
-    with open(path, "r") as f:
-        return json.load(f)
-
-
-# =========================
-#    RUNS HISTORY (GLOBAL)
-# =========================
-
-def load_runs_history():
-    """Load runs_history.json, return [] if empty."""
-    ensure_dirs()
-    if not os.path.exists(RUNS_HISTORY_FILE):
+def load_runs_history() -> List[Dict[str, Any]]:
+    """Charge la liste des runs depuis runs_history.json."""
+    _ensure_dirs()
+    if not os.path.exists(HISTORY_PATH):
         return []
 
     try:
-        return load_json(RUNS_HISTORY_FILE)
+        with open(HISTORY_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return data
+        return []
     except Exception:
+        # En cas de fichier corrompu, on repart de zéro
         return []
 
 
-def save_runs_history(history):
-    """Overwrite runs_history.json."""
-    ensure_dirs()
-    save_json(RUNS_HISTORY_FILE, history)
+def save_runs_history(history: List[Dict[str, Any]]) -> None:
+    """Écrit la liste des runs dans runs_history.json."""
+    _ensure_dirs()
+    with open(HISTORY_PATH, "w", encoding="utf-8") as f:
+        json.dump(history, f, ensure_ascii=False, indent=2)
 
 
-def append_run_to_history(run_meta):
-    """Add a run entry to runs_history.json."""
+def get_hof_top3(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Retourne les 3 meilleurs runs triés par accuracy décroissante."""
+    if not history:
+        return []
+    sorted_hist = sorted(
+        history,
+        key=lambda x: x.get("final_accuracy", 0.0),
+        reverse=True,
+    )
+    return sorted_hist[:3]
+
+
+# ============================================================
+# Sauvegarde d’un run complet
+# ============================================================
+
+def save_full_run(
+    run_id: str,
+    net: Network,
+    final_accuracy: float,
+    metrics_history: List[Dict[str, Any]],
+    weight_history: Dict[str, Any],
+    misclassified: List[Any],
+    config: Dict[str, Any],
+) -> None:
+    """
+    Sauvegarde *tout* ce qui concerne un run dans runs/<run_id>/ :
+
+      - model.pkl        : dict {sizes, weights, biases}
+      - metrics.pkl      : liste de dicts par epoch
+      - weights.pkl      : historique des poids (première couche)
+      - misclassified.pkl: exemples mal classés
+      - config.pkl       : hyperparamètres + métadonnées
+
+    Et met à jour runs_history.json pour le Hall of Fame.
+    """
+    _ensure_dirs()
+    rdir = _run_dir(run_id)
+    os.makedirs(rdir, exist_ok=True)
+
+    # --- 1) Modèle (sans pickler l'objet Network) ---
+    model_payload = {
+        "sizes": net.sizes,
+        "weights": net.weights,
+        "biases": net.biases,
+    }
+    with open(os.path.join(rdir, "model.pkl"), "wb") as f:
+        pickle.dump(model_payload, f)
+
+    # --- 2) Metrics ---
+    with open(os.path.join(rdir, "metrics.pkl"), "wb") as f:
+        pickle.dump(metrics_history, f)
+
+    # --- 3) Weight history ---
+    with open(os.path.join(rdir, "weights.pkl"), "wb") as f:
+        pickle.dump(weight_history, f)
+
+    # --- 4) Misclassified ---
+    with open(os.path.join(rdir, "misclassified.pkl"), "wb") as f:
+        pickle.dump(misclassified, f)
+
+    # --- 5) Config + summary ---
+    config_with_acc = dict(config)
+    config_with_acc["final_accuracy"] = float(final_accuracy)
+    with open(os.path.join(rdir, "config.pkl"), "wb") as f:
+        pickle.dump(config_with_acc, f)
+
+    # --- 6) Met à jour l’historique global (pour le Hall of Fame) ---
     history = load_runs_history()
-    history.append(run_meta)
+
+    summary = {
+        "run_id": run_id,
+        "timestamp": config.get("timestamp"),
+        "sizes": config.get("sizes"),
+        "final_accuracy": float(final_accuracy),
+        "epochs": config.get("epochs"),
+        "learning_rate": config.get("learning_rate"),
+        "mini_batch_size": config.get("mini_batch_size"),
+        "use_validation": config.get("use_validation"),
+        "limit_train": config.get("limit_train"),
+    }
+
+    # Si le run_id existe déjà dans l’historique, on le remplace
+    history = [h for h in history if h.get("run_id") != run_id]
+    history.append(summary)
+
     save_runs_history(history)
 
 
-# =========================
-#    SAVE FULL RUN
-# =========================
+# ============================================================
+# Chargement d’un run (utilisé par Hall of Fame + onglets)
+# ============================================================
 
-def save_full_run(
-    run_id,
-    net,
-    final_accuracy,
-    metrics_history,
-    weight_history,
-    misclassified,
-    config,
-):
+def load_single_run(run_id: str) -> Optional[Dict[str, Any]]:
     """
-    Save:
-    - model.pkl
-    - metrics.pkl
-    - weight_history.pkl
-    - misclassified.pkl
-    - config.json
-    - and append to runs_history.json
+    Charge toutes les données associées à un run.
+
+    Retourne un dict:
+      {
+        "model": {...},
+        "metrics": [...],
+        "weight_history": {...},
+        "misclassified": [...],
+        "config": {...}
+      }
+
+    Si le dossier ou les fichiers manquent, retourne None.
     """
-
-    ensure_dirs()
-
-    short_acc = f"{final_accuracy*100:.2f}".replace(".", "")
-    run_dir = os.path.join(RUNS_DIR, f"{run_id}_{short_acc}")
-    os.makedirs(run_dir, exist_ok=True)
-
-    # ---- SAVE MODEL ----
-    model_payload = {
-        "sizes": net.sizes,
-        "biases": net.biases,
-        "weights": net.weights,
-    }
-    save_pickle(os.path.join(run_dir, "model.pkl"), model_payload)
-
-    # ---- METRICS ----
-    save_pickle(os.path.join(run_dir, "metrics.pkl"), metrics_history)
-
-    # ---- WEIGHT HISTORY ----
-    save_pickle(os.path.join(run_dir, "weight_history.pkl"), weight_history)
-
-    # ---- MISCLASSIFIED ----
-    save_pickle(os.path.join(run_dir, "misclassified.pkl"), misclassified)
-
-    # ---- CONFIG ----
-    config_with_acc = config.copy()
-    config_with_acc["final_accuracy"] = final_accuracy
-    config_with_acc["run_id"] = run_id
-    save_json(os.path.join(run_dir, "config.json"), config_with_acc)
-
-    # ---- UPDATE GLOBAL SCOREBOARD ----
-    summary_entry = {
-        "run_id": run_id,
-        "timestamp": config["timestamp"],
-        "sizes": config["sizes"],
-        "final_accuracy": final_accuracy,
-        "model_path": f"{RUNS_DIR}/{run_id}/model.pkl",
-        "config_name": config["config_name"],
-    }
-
-    append_run_to_history(summary_entry)
-
-
-# =========================
-#    LOAD SINGLE RUN
-# =========================
-
-def load_single_run(run_id):
-    run_dir = os.path.join(RUNS_DIR, run_id)
-    if not os.path.exists(run_dir):
+    _ensure_dirs()
+    rdir = _run_dir(run_id)
+    if not os.path.isdir(rdir):
+        # aucun dossier pour ce run → on ne peut rien charger
         return None
 
-    out = {}
+    def _safe_load_pickle(path: str, default):
+        if not os.path.exists(path):
+            return default
+        try:
+            with open(path, "rb") as f:
+                return pickle.load(f)
+        except Exception:
+            return default
 
-    # model
-    model_path = os.path.join(run_dir, "model.pkl")
-    if os.path.exists(model_path):
-        out["model"] = load_pickle(model_path)
+    # --- Tente au cas où tu aurais un full.pkl historique ---
+    full_path = os.path.join(rdir, "full.pkl")
+    if os.path.exists(full_path):
+        try:
+            with open(full_path, "rb") as f:
+                full = pickle.load(f)
+            # On s'assure qu'on renvoie au moins les clés attendues
+            if isinstance(full, dict):
+                full.setdefault("metrics", [])
+                full.setdefault("weight_history", {})
+                full.setdefault("misclassified", [])
+                full.setdefault("config", {})
+                return full
+        except Exception:
+            # On tombe alors sur le mode "fichiers séparés"
+            pass
 
-    # metrics
-    metrics_path = os.path.join(run_dir, "metrics.pkl")
-    if os.path.exists(metrics_path):
-        out["metrics"] = load_pickle(metrics_path)
-    else:
-        out["metrics"] = []
+    # --- Format fichiers séparés (moderne) ---
+    model = _safe_load_pickle(os.path.join(rdir, "model.pkl"), None)
+    if model is None:
+        # sans modèle, on considère le run inutilisable
+        return None
 
-    # weight history
-    weight_path = os.path.join(run_dir, "weight_history.pkl")
-    if os.path.exists(weight_path):
-        out["weight_history"] = load_pickle(weight_path)
-    else:
-        out["weight_history"] = {}
+    metrics = _safe_load_pickle(os.path.join(rdir, "metrics.pkl"), [])
+    weights = _safe_load_pickle(os.path.join(rdir, "weights.pkl"), {})
+    miscls = _safe_load_pickle(os.path.join(rdir, "misclassified.pkl"), [])
+    config = _safe_load_pickle(os.path.join(rdir, "config.pkl"), {})
 
-    # misclassified
-    miscls_path = os.path.join(run_dir, "misclassified.pkl")
-    if os.path.exists(miscls_path):
-        out["misclassified"] = load_pickle(miscls_path)
-    else:
-        out["misclassified"] = []
-
-    # config
-    config_path = os.path.join(run_dir, "config.json")
-    if os.path.exists(config_path):
-        out["config"] = load_json(config_path)
-    else:
-        out["config"] = {}
-
-    return out
-
-
-# =========================
-#    LOAD ALL RUNS
-# =========================
-
-def load_all_runs():
-    """
-    Returns:
-    {
-        run_id: {
-            "model": ...,
-            "metrics": [...],
-            "weight_history": ...,
-            "misclassified": [...],
-            "config": {...}
-        },
-        ...
+    return {
+        "model": model,
+        "metrics": metrics,
+        "weight_history": weights,
+        "misclassified": miscls,
+        "config": config,
     }
+
+
+# ============================================================
+# Chargement de tous les runs au démarrage
+# ============================================================
+
+def load_all_runs() -> Dict[str, Dict[str, Any]]:
     """
+    Parcourt runs/ et charge tous les runs disponibles.
 
-    ensure_dirs()
+    Retourne un dict: run_id -> full_run_dict
+    """
+    _ensure_dirs()
+    all_runs: Dict[str, Dict[str, Any]] = {}
 
-    runs = {}
-    for run_id in os.listdir(RUNS_DIR):
-        full_dir = os.path.join(RUNS_DIR, run_id)
-        if not os.path.isdir(full_dir):
+    # On se base sur les dossiers présents
+    for name in os.listdir(RUNS_DIR):
+        rdir = os.path.join(RUNS_DIR, name)
+        if not os.path.isdir(rdir):
             continue
 
-        data = load_single_run(run_id)
-        if data:
-            runs[run_id] = data
+        full = load_single_run(name)
+        if full:
+            all_runs[name] = full
 
-    return runs
-
-
-# =========================
-#    HELPER : HALL OF FAME
-# =========================
-
-def get_hof_top3(runs_history):
-    """
-    Return top 3 runs based on final_accuracy.
-    """
-    sorted_runs = sorted(
-        runs_history,
-        key=lambda r: r.get("final_accuracy", 0.0),
-        reverse=True
-    )
-    return sorted_runs[:3]
+    return all_runs
