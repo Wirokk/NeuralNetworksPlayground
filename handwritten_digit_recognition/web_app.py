@@ -19,6 +19,7 @@ from persistence import (
     save_runs_history,
     save_full_run,
     get_hof_top3,
+    load_single_run,
 )
 from training_lock import (
     try_acquire_lock,
@@ -265,35 +266,40 @@ def draw_hall_of_fame():
             )
 
             if st.button(f"➡️ Utiliser {entry['run_id']}", key=f"hof_load_{i}"):
-                # Charger un modèle depuis persistence
-                full = st.session_state.all_runs.get(entry["run_id"])
-                if full:
-                    model_dict = full["model"]
-                    net = Network(model_dict["sizes"])
-                    net.weights = model_dict["weights"]
-                    net.biases = model_dict["biases"]
+                # Charger le run directement depuis le disque
+                full = load_single_run(entry["run_id"])
+
+                if not full:
+                    st.error("Impossible de charger ce modèle depuis le disque.")
+                else:
+                    model_payload = full["model"]
+                    net = Network(model_payload["sizes"])
+                    net.weights = model_payload["weights"]
+                    net.biases = model_payload["biases"]
 
                     # Mise à jour du modèle actif
                     st.session_state.current_run = {
                         "run_id": entry["run_id"],
                         "sizes": entry["sizes"],
                         "timestamp": entry["timestamp"],
-                        "final_accuracy": entry["final_accuracy"],
-                        "model_path": entry["model_path"],
+                        "final_accuracy": entry.get("final_accuracy", full["config"].get("final_accuracy", 0.0)),
+                        "model_path": f"runs/{entry['run_id']}/model.pkl",
                         "source": "hall_of_fame",
                     }
 
-                    # On recharge les caches associées
-                    st.session_state.metrics_history = full["metrics"]
+                    # Mettre à jour les caches en session
+                    st.session_state.all_runs[entry["run_id"]] = full
+                    st.session_state.metrics_history = full.get("metrics", [])
                     st.session_state.weight_history = {
-                        entry["run_id"]: full["weight_history"]
+                        entry["run_id"]: full.get("weight_history", {})
                     }
                     st.session_state.misclassified_cache = {
-                        entry["run_id"]: full["misclassified"]
+                        entry["run_id"]: full.get("misclassified", [])
                     }
 
                     st.success(f"Modèle {entry['run_id']} chargé depuis Hall of Fame !")
-                    st.rerun()
+                    st.rerun()  # (ou st.experimental_rerun() selon ta version)
+
 
 
 # ===============================================================
